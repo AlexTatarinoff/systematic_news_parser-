@@ -1,0 +1,16 @@
+# Данные и разработка в ноутбучиках
+notebooks_dev/
+saved_data/
+*.csv
+*.log
+
+# Python
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Секреты и настройки
+.env
