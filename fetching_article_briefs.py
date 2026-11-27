@@ -48,6 +48,7 @@ TABLE_NAME_ARTICLES = 'articles_briefs'
 TABLE_NAME_BLOGS = 'blogs'
 TABLE_NAME_AUTHORS = 'authors'
 TABLE_NAME_CHANNELS = 'channels'
+TABLE_LAUNCHES = 'scripts_launches'
 #|%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%|
 
 
@@ -98,7 +99,7 @@ PARSE_UNTIL = '2026-10-15 00:00'
 
 # для режима "скачать последние N статей" ('N_last_articles') нужно вручную задать след. константу
 # не забываем, что реальное кол-во забранных статей будет кратно десяти: задали 3 - получили 10, задали 11 - держите 20
-ARTICLES_TO_FETCH = 50
+ARTICLES_TO_FETCH = 40
 # |%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%|
 
 
@@ -455,7 +456,7 @@ def EndlessFeedDownloading(n_articles=10, last_saved_ts=None) -> list:
     with requests.Session() as session:
         session.headers.update(headers)
         # были ли проблемы с подгружением статей?
-        is_connection_troubles = False
+        is_connection_ok = True
         # кол-во попыток коннекта
         attempts = 0
         # for iteration in range(pages_count):
@@ -472,7 +473,7 @@ def EndlessFeedDownloading(n_articles=10, last_saved_ts=None) -> list:
 
                 if response.status_code != 200:
                     print(f"Ошибка запроса: {response.status_code}")
-                    is_connection_troubles = True
+                    is_connection_ok = False
                     attempts += 1
                     if attempts > 3:
                         print('ВАЖНО: проблемы со связью, не удалось подключиться больше 3 раз')
@@ -484,10 +485,9 @@ def EndlessFeedDownloading(n_articles=10, last_saved_ts=None) -> list:
                 # на этот раз всё просто - у нас в ответе чистейшей воды джейсончик без всякой хтмльщины!
                 data = response.json()
                 posts = data.get('documents')
-                print('Посты:', posts)
                 if not posts:
                     print("Статьи не удалось подгрузить...")
-                    is_connection_troubles = True
+                    is_connection_ok = False
                     continue
 
                 all_articles.extend(posts)
@@ -527,7 +527,7 @@ def EndlessFeedDownloading(n_articles=10, last_saved_ts=None) -> list:
             iteration += 1
             time.sleep(random.uniform(3, 6))
 
-    return all_articles, is_connection_troubles
+    return all_articles, is_connection_ok
 
 
 def picking_briefs_data(all_articles):
@@ -582,6 +582,35 @@ def picking_briefs_data(all_articles):
 
     return (articles_data_to_save, blogs_data_to_save, authors_data_to_save)
 
+# в дальнейшем убрать в отд. скрипт со всеми БД-функциями
+def update_launches_table(db_params, table_name, script_name, was_it_ok, items_num):
+    '''
+    Обновляем данные по запуску скрипта script_name
+    - was_it_ok - успешно ли всё прошло (в начальной версии всё в одну кучу - и коннект, и траблы с парсингом, не важно)
+    - items_num - сколько брифов\статей парсили
+    '''
+    try:
+        conn = psycopg2.connect(**db_params)
+        cursor = conn.cursor()
+        query = f"""
+            INSERT INTO {table_name} (
+                script_name, is_success, items_num
+            )
+            VALUES %s
+        """
+        execute_values(cursor, query, ((script_name, was_it_ok, items_num),))
+        conn.commit()
+    except Exception as e:
+        print(f"Произошла ошибка: {e}")
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        if 'cursor' in locals(): cursor.close()
+        if 'conn' in locals(): conn.close()
+            
+    return True
+    
 
 def main(parse_mode = PARSE_MODE, parse_until = PARSE_UNTIL, articles_to_fetch = ARTICLES_TO_FETCH):
     '''
@@ -610,13 +639,18 @@ def main(parse_mode = PARSE_MODE, parse_until = PARSE_UNTIL, articles_to_fetch =
     # v.22ноября - забираем каналы ИЗ БД и перекидываем их в глобальный дикт для удобства
     global CHANNELS
     CHANNELS = GetChannelsFromDB(DB_PARAMS, TABLE_NAME_CHANNELS)
-    
-    arts, connect_troubles = EndlessFeedDownloading(articles_to_fetch, last_saved_ts)
 
+    # в connect_success пока не делаем различий между проблемами коннекта и парсинга
+    arts, connect_success = EndlessFeedDownloading(articles_to_fetch, last_saved_ts)
+    
     # если не набрали статей, сразу выходим
     if len(arts) == 0:
         print('ВАЖНО: Cтатьи получить не удалось, выходим.')
-        return arts, connect_troubles
+        update_launches_table(
+            DB_PARAMS, TABLE_LAUNCHES, 'fetching_article_briefs', 
+            connect_success, articles_to_fetch
+        )    
+        return arts, connect_success
     else:
         data_to_save = picking_briefs_data(arts)
         # articles_data_to_save
@@ -625,10 +659,12 @@ def main(parse_mode = PARSE_MODE, parse_until = PARSE_UNTIL, articles_to_fetch =
         SavingBlogsData_DB(data_to_save[1], DB_PARAMS, TABLE_NAME_BLOGS)
         # authors_data_to_save, БД спокойно кушает множества при вставке, можно не отправлять списком
         SavingAuthorsData_DB(data_to_save[2], DB_PARAMS, TABLE_NAME_AUTHORS)
-
-    return data_to_save, connect_troubles
+        update_launches_table(
+            DB_PARAMS, TABLE_LAUNCHES, 'fetching_article_briefs', 
+            connect_success, articles_to_fetch
+        )  
+    return data_to_save, connect_success
 
 
 if __name__ == '__main__':
-    # print('Запуск мэйна...')
     main()
